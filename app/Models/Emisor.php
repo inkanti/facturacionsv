@@ -6,7 +6,7 @@ use App\Enums\AmbienteMh;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\HasMany;
 use Illuminate\Database\Eloquent\Relations\HasOne;
-
+use Illuminate\Database\Eloquent\Builder;
 /**
  * Emisor (contribuyente) del tenant. Vive en la BD del tenant.
  *
@@ -31,11 +31,28 @@ class Emisor extends Model
         'correo',
         'ambiente',
         'estado',
+        'departamento',
+        'municipio',
+        'distrito',
+        'direccion_complemento',
+        'cod_punto_venta',
     ];
 
     protected $casts = [
         'ambiente' => AmbienteMh::class,
     ];
+
+
+    /**
+     * Emisor habilitado. OJO: la columna real se llama "estado"
+     * (valor 'activo'), no "activo" — verificado contra tenant_demo.emisores.
+     */
+    public function scopeActivo(Builder $query): Builder
+    {
+        return $query->where('estado', 'activo');
+    }
+
+    
 
     /** Certificados .p12 registrados para este emisor. */
     public function certificados(): HasMany

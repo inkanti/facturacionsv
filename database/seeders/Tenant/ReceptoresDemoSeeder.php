@@ -21,6 +21,9 @@ class ReceptoresDemoSeeder extends Seeder
                 'municipio' => '14',
                 'direccion_complemento' => 'Col. Escalón, Calle Principal #123',
                 'activo' => true,
+                'nrc' => '1234567',
+                'desc_actividad' => 'Venta al por menor',
+                'distrito' => '14',
             ],
             [
                 'tipo_documento' => '13',
@@ -33,6 +36,9 @@ class ReceptoresDemoSeeder extends Seeder
                 'municipio' => '18',
                 'direccion_complemento' => 'Res. Los Álamos, Pol. C, Casa 45',
                 'activo' => true,
+                'nrc' => '1234567',
+                'desc_actividad' => 'Venta al por menor',
+                'distrito' => '14',
             ],
             [
                 'tipo_documento' => '37',
@@ -45,16 +51,15 @@ class ReceptoresDemoSeeder extends Seeder
                 'municipio' => null,
                 'direccion_complemento' => null,
                 'activo' => true,
+                'nrc' => '1234567',
+                'desc_actividad' => 'Venta al por menor',
+                'distrito' => '14',
             ],
         ];
 
         foreach ($receptores as $datos) {
-            // Idempotente: re-correr el seeder no duplica registros
-            Receptor::firstOrCreate(
-                [
-                    'tipo_documento' => $datos['tipo_documento'],
-                    'num_documento' => $datos['num_documento'],
-                ],
+             Receptor::updateOrCreate(
+                ['tipo_documento' => $datos['tipo_documento'], 'num_documento' => $datos['num_documento']],
                 $datos
             );
         }
