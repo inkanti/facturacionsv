@@ -19,6 +19,15 @@ class AlmacenDte
         return $ruta;
     }
 
+    /** Lee la copia para el receptor desde el disco (null si no existe). */
+    public function leerCopiaReceptor(Documento $documento): ?string
+    {
+        $ruta = $this->rutaPara($documento, 'receptor.json');
+        return Storage::disk('local')->exists($ruta)
+            ? Storage::disk('local')->get($ruta)
+            : null;
+    }
+
     public function guardarFirma(Documento $documento, string $firmaJws): string
     {
         $ruta = $this->rutaPara($documento, 'jws');

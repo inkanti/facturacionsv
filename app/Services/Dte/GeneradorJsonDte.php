@@ -142,7 +142,7 @@ class GeneradorJsonDte
             'montoTotalOperacion' => (float) $documento->total,
             'totalNoGravado' => 0,
             'totalPagar' => (float) $documento->total,
-            'totalLetras' => null, // TODO: conversor de número a letras
+            'totalLetras' => app(NumeroALetras::class)->aLetras((float) $documento->total), 
             'saldoFavor' => 0,
             'condicionOperacion' => 1, // CAT-016: 1 contado, 2 crédito, 3 otro
             'pagos' => null,           // CAT-017 cuando aplique

@@ -144,7 +144,9 @@ class EmisorDocumentos
             default => 'M',
         };
 
-        $secuencia = Documento::where('tipo_documento', $tipoDocumento)->count() + 1;
+        $secuencia = Documento::where('tipo_documento', $tipoDocumento)
+    ->whereNotNull('numero_control')
+    ->count() + 1;
 
         return sprintf(
             'DTE-%s-%s%03dP%03d-%015d',
