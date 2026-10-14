@@ -14,6 +14,10 @@ use Stancl\Tenancy\Jobs;
 use Stancl\Tenancy\Listeners;
 use Stancl\Tenancy\Middleware;
 
+use App\Enums\EstadoSuscripcion;
+use App\Models\Subscription;
+use App\Models\Tenant;
+
 /**
  * Provider de tenancy de FACTURADOR SV — formato stancl/tenancy v3.10.x.
  *
@@ -77,9 +81,19 @@ class TenancyServiceProvider extends ServiceProvider
 
     public function boot(): void
     {
+
         $this->bootEvents();
         $this->mapRoutes();
         $this->makeTenancyMiddlewareHighestPriority();
+
+        // Módulo 5: todo tenant nuevo inicia con prueba gratis de 14 días
+        Tenant::created(function (Tenant $tenant) {
+            Subscription::firstOrCreate(
+                ['tenant_id' => $tenant->getTenantKey(), 'estado' => EstadoSuscripcion::Trial],
+                ['trial_hasta' => now()->addDays(14)->toDateString()]
+            );
+        });
+
     }
 
     protected function bootEvents(): void

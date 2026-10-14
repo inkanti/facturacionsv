@@ -7,6 +7,9 @@ use App\Services\Dte\ProveedorDteMH;
 use App\Services\Dte\ProveedorDteSimulado;
 use Illuminate\Support\ServiceProvider;
 
+use App\Http\Middleware\EnsureSubscriptionActiva;
+use Illuminate\Routing\Router;
+
 class AppServiceProvider extends ServiceProvider
 {
     /**
@@ -26,8 +29,9 @@ class AppServiceProvider extends ServiceProvider
     /**
      * Bootstrap any application services.
      */
-    public function boot(): void
+    
+    public function boot(Router $router): void
     {
-        //
+        $router->aliasMiddleware('suscripcion.activa', EnsureSubscriptionActiva::class);
     }
 }
