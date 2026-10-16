@@ -33,6 +33,10 @@
         .fila-datos { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: .8rem; }
         .fila-datos .lbl { color: #6b7280; font-size: .8rem; }
         .fila-datos .val { font-weight: 600; }
+
+        nav form.logout-form { margin-left: auto; }
+        nav form.logout-form button { background: none; border: 0; color: #dbeafe; font-size: .95rem; cursor: pointer; }
+        nav form.logout-form button:hover { color: #fff; }
     </style>
 </head>
 <body>
@@ -41,6 +45,11 @@
     <a href="{{ route('tenant.welcome') }}">Inicio</a>
     <a href="{{ route('documentos.index') }}">Documentos</a>
     <a href="{{ route('suscripcion.estado') }}">Mi suscripción</a>
+    <a href="{{ route('usuarios.index') }}">Usuarios</a>
+    <form method="POST" action="{{ route('tenant.logout') }}" class="logout-form">
+        @csrf
+        <button type="submit">Cerrar sesión ({{ auth()->user()->name }})</button>
+    </form>
 </nav>
 <main>
     @yield('contenido')

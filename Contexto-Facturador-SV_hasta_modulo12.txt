@@ -1,0 +1,253 @@
+# Facturador SV — Contexto del proyecto (actualizado al Módulo 12 CERRADO)
+
+Documento de continuación. Léelo completo al inicio del nuevo chat y retoma desde
+la sección 3 (Módulo 13 en curso).
+
+---
+
+## 1. RESUMEN DEL PROYECTO
+
+**Facturador SV**: SaaS multi-tenant de facturación electrónica (DTE) para El
+Salvador, dirigido a pequeños negocios. Emite DTE ante el MH (Ministerio de
+Hacienda): FE (01, consumidor final) y CCF (03, crédito fiscal). Arquitectura
+administrada por asistente: el usuario pega/verifica archivos y aplica cambios
+paso a paso.
+
+**Stack**: Laravel 12, PHP 8.2, Livewire 4.4.7 (full-page components con
+`->layout('tenant.layout')`), stancl/tenancy 3.10, MySQL (central
+`facturador_central` + tenants `tenant_xxx`), Redis (Memurai en Windows, puerto
+6379) para colas (queue `dte`) y caché, predis. Servido con XAMPP/Apache
+(Apache/2.4.58 Win64, PHP 8.2.12) en puerto 80.
+
+**Dominios dev**: `facturadorsv.test` (central/admin) y
+`demo.facturadorsv.test` (tenant demo, nombre "Negocio Demo"). Entrar a
+`/admin/login` con admin@facturadorsv.test (Módulo 5).
+
+**Proveedor MH**: simulado, pero con validación real de JSON Schema
+(opis/json-schema, draft-07). `json_decode` SIN assoc para el validador.
+FE (01) usa schema v2; CCF/NC/ND usan v4.
+
+---
+
+## 2. ESTADO DE MÓDULOS
+
+CERRADOS: 0 (setup), 1 (tenancy), 2 (emisores), 3 (numeración), 4 (JSON DTE),
+5 (suscripciones + admin central), 6 (firma), 7 (transmisión), 8 (consulta y
+pantallas), 9 (PDF), 10 (email automático), 11 (CRUD receptores y productos),
+12 (usuarios y acceso del tenant).
+
+### Módulo 12 — Usuarios y acceso (CERRADO 17/10/2026)
+
+- **Login del tenant**: `app/Http/Controllers/Tenant/Auth/LoginController.php`
+  (métodos `mostrar`, `login`, `logout`). Correo + contraseña, `remember`,
+  `redirect()->intended(route('documentos.index'))`. Si el tenant NO tiene
+  usuarios, `mostrar()` redirige a `tenant.setup`.
+- **Setup inicial**: `app/Http/Controllers/Tenant/Auth/SetupController.php`
+  (`mostrar`, `crear`). Solo accesible si `User::count() === 0`
+  (`abort_unless`), crea el primer usuario y loguea. Vistas aisladas
+  `resources/views/tenant/auth/login.blade.php` y `setup.blade.php` (NO usan
+  el layout del tenant; usan Tailwind vía CDN para no depender del layout
+  autenticado). Título usa `tenant('name')` (NO 'nombre').
+- **Rutas** en `routes/tenant.php`:
+  - `guest`: `GET/POST login`, `GET/POST setup` (nombres `tenant.login`,
+    `tenant.setup`).
+  - `POST logout` (`tenant.logout`) — fuera de guest, accesible logueado.
+  - `auth` (sin suscripcion.activa): `suscripcion.estado` y `usuarios.index`.
+  - `auth + suscripcion.activa`: documentos, receptores, productos y
+    descargas (JSON/PDF/consulta MH).
+- **redirectGuestsTo CONDICIONAL** en `bootstrap/app.php`:
+  `tenancy()->initialized ? route('tenant.login') : route('admin.login')`.
+  OJO: el redirectGuestsTo del Módulo 5 NUNCA existió en el proyecto real
+  (el contexto anterior decía que sí — estaba equivocado; se agregó ahora en
+  forma condicional, cubriendo admin + tenant). También hay `redirectUsersTo`
+  condicional: tenant → `documentos.index`, central → `'/admin'`.
+- **CRUD usuarios**: `app/Livewire/Tenant/Usuarios/Lista.php` + vista
+  `resources/views/livewire/tenant/usuarios/lista.blade.php` (mismo patrón
+  que receptores). Crear/editar (contraseña opcional al editar, `confirmed`),
+  `toggleActivo` (no permite desactivarse a sí mismo), sin borrado físico.
+- **Migración tenant**: columna `users.activo` boolean default true
+  (guard con `Schema::hasColumn`). Agregada al `$fillable` de `User`.
+- **Login bloquea inactivos**: en `LoginController@login`, tras
+  `Auth::attempt`, si `! auth()->user()->activo` → logout + error "Este
+  usuario está desactivado.".
+- **Layout**: `resources/views/tenant/layout.blade.php` (está en views/tenant,
+  NO en views/layouts). Nav con: marca `tenant('name')`, Inicio, Documentos,
+  Mi suscripción, Usuarios, y formulario de logout (estilos CSS propios
+  `nav form.logout-form`, NO clases Tailwind). Usa `@yield('titulo')`,
+  `@yield('contenido')` y `{{ $slot ?? '' }}`.
+- **VirtualHosts Apache**: estaban AUSENTES (por eso un momento dio 404 crudo
+  de Apache "Extraviado"). Se crearon en
+  `C:\xampp\apache\conf\extra\httpd-vhosts.conf` DOS vhosts (*:80) con
+  DocumentRoot al `public` del proyecto (ruta con espacios, barras `/`) para
+  `facturadorsv.test` y `demo.facturadorsv.test`, con `AllowOverride All` +
+  `Require all granted`. Hosts de Windows OK. Reiniciar Apache (Stop/Start)
+  tras tocar vhosts.
+
+---
+
+## 3. MÓDULO 13 — CREACIÓN DE EMPRESAS DESDE ADMIN CENTRAL (EN CURSO, empezar aquí)
+
+**Decisión tomada**: la creación de tenants será SOLO desde el admin central.
+
+**Objetivo**: desde el panel admin (facturadorsv.test/admin) poder crear una
+empresa nueva: datos del negocio (nombre, dominio `xxx.facturadorsv.test`,
+NIT/NRC del emisor, etc.) + creación del PRIMER USUARIO del tenant (email +
+contraseña). Al crear: tenant (dispara jobs de creación de BD — ver conv.
+de limpieza), emisor, numeración inicial, suscripción/trial (Módulo 5),
+primer usuario en la BD del tenant.
+
+**Ya verificado (heredado)**:
+- Admin central: guard `admin`, modelo `App\Models\AdminUser`,
+  `app/Http/Controllers/Admin/Auth/LoginController.php` (PROPIO, no confundir
+  con el del tenant), rutas admin: login, dashboard, tenants CRUD, planes.
+- `App\Models\Tenant` (central, trait HasDatabase); evento `Tenant::created`
+  dispara el trial (Módulo 5).
+- El SetupController del Módulo 12 ya permite que el primer usuario se cree
+  solo si el tenant quedó sin usuarios — para M13 el primer usuario se crea
+  DIRECTO desde el admin central (hay que escribir en la BD del tenant nuevo
+  desde el contexto central: `tenancy()->initialize($tenant)` + `User::create`
+  + `tenancy()->end()`, o un job).
+
+**PRIMER PASO en el nuevo chat**: pedir al usuario que adjunte:
+1. `app/Http/Controllers/Admin/TenantController.php` (o el controlador que
+   tenga el CRUD de tenants del admin)
+2. `app/Models/Tenant.php`
+3. La vista del formulario de creación de tenants del admin
+   (probablemente `resources/views/admin/tenants/*.blade.php`)
+Con eso diseñar: extensión del formulario (datos del emisor + primer
+usuario), lógica de creación (tenant → emisor → numeración → usuario en BD
+tenant), y prueba con un tercer dominio de prueba.
+
+**Roadmap después del 13**: Cuentas por cobrar, Anexo de IVA, Notas sobre FE
+(NC/ND ya existen parcialmente del Módulo 8). Pendiente menor heredado del
+M11: confirmar que el generador de JSON usa `porcentaje_iva`/`tipo` de
+productos (probar con producto exento; si falla, pedir
+`app/Services/Dte/EmisorDocumentos.php` o GeneradorJsonDte).
+
+---
+
+## 4. MODELOS Y SERVICIOS CLAVE EXISTENTES
+
+- `App\Models\User` (tenant): fillable name, email, password, activo; casts
+  password=hashed. Columnas estándar + `activo` (M12).
+- `App\Models\Receptor`, `App\Models\Producto` (tenant). `$fillable` debe
+  incluir TODAS las columnas masivamente asignables.
+- `App\Models\Emisor` (tenant): scope `activo()`, campos nrc,
+  codigo_establecimiento, actividad_economica, actividad_economica_desc.
+- `App\Models\Tenant` (central), trait HasDatabase; evento Tenant::created
+  dispara trial (Módulo 5).
+- `App\Models\AdminUser` (central, guard admin), `App\Models\Plan`,
+  `App\Models\Subscription`, enum `EstadoSuscripcion`.
+- `App\Services\Dte\EmisorDocumentos`: crearBorrador($receptor, $items),
+  emitir($documento). NumeroALetras: método REAL es `aLetras(float): string`
+  (NO enLetras). GeneradorPdfDte genera el PDF. Jobs: FirmarTransmitirDocumento
+  (cola `dte`), EnviarDocumentoCliente.
+- Middleware `suscripcion.activa` (EnsureSubscriptionActiva) protege rutas de
+  negocio del tenant; `suscripcion.estado` y `usuarios.index` quedan fuera del
+  bloqueo (solo requieren `auth`).
+- Livewire: `Livewire::setUpdateRoute` configurado para tenancy (ver
+  TenancyServiceProvider). Componentes full-page con `->layout('tenant.layout')`.
+- `bootstrap/app.php`: `redirectGuestsTo` y `redirectUsersTo` condicionales
+  por `tenancy()->initialized`.
+
+---
+
+## 5. CONVENCIONES DEL PROYECTO (respetar)
+
+1. Migrations con nombre de tabla explícito (`$table`), imports concretos de
+   Schema, columnas money como `decimal(12,2)`.
+2. Toda columna masivamente asignable va en `$fillable` del modelo.
+3. Comentarios en español en el código.
+4. numero_control / codigo_generacion se asignan al emitir, no al crear el
+   borrador.
+5. Jobs reciben tenantId y hacen `tenancy()->initialize()` / `tenancy()->end()`
+   en try/finally. La tabla `failed_jobs` queda en la base CENTRAL (porque
+   tenancy()->end() corre en el finally antes de que Laravel registre el
+   fallo).
+6. (Conv. 23) NUNCA redeclarar `public string $queue` en un Job: conflicta con
+   el trait Queueable ("Class was composed"). Usar `$this->onQueue('dte')` en
+   el constructor.
+7. (Conv. 24) PowerShell destruye `tinker --execute='...'` con comillas
+   anidadas (PsySH recibe código truncado tipo `'echo` y falla en silencio o
+   con "Unexpected end of input"). Patrón confiable:
+   ```powershell
+   @'
+   file_put_contents('check.txt', ...codigo php...);
+   '@ | php artisan tinker
+   Get-Content check.txt
+   ```
+   Ojo: tinker corre SIN tenant (consulta facturador_central). Para tocar
+   datos del tenant hay que inicializar:
+   ```php
+   $tenant = App\Models\Tenant::first();
+   tenancy()->initialize($tenant);
+   ...consultas...
+   tenancy()->end();
+   ```
+8. Cache en contexto tenant: stancl/tenancy v3 etiqueta el caché por tenant;
+   el driver DEBE soportar tags → `CACHE_STORE=redis` (file/array/database
+   tiran "Este sistema de almacenamiento en caché no admite el etiquetado").
+   Después de cambiar .env: `php artisan config:clear`.
+9. `queue:work` cachea código: reiniciar el worker tras cambiar jobs
+   (`php artisan queue:restart` o Ctrl+C y de nuevo). `queue:flush` vacía.
+10. Blade compilado: `php artisan view:clear` si una vista "no se aplica".
+11. Migraciones que agregan columnas: guardas `Schema::hasColumn()`.
+12. QR (chillerlan/php-qrcode v5): no existen `QRCode::OUTPUT_*`; usar string
+    'png'; `render()` ya devuelve data URI completo (no base64_encode otra vez).
+13. MH: header User-Agent obligatorio; token Bearer de /seguridad/auth.
+14. (Conv. 25, M12) Las dos vistas de auth del tenant (login/setup) son
+    páginas AISLADAS sin layout: el layout usa `auth()->user()` y rompería
+    para invitados. Tailwind por CDN solo en esas páginas.
+15. (Conv. 26, M12) Un 404 con texto "Extraviado / La URL solicitada no se
+    encontró / Apache/x.x" es un 404 de APACHE (nunca llegó a Laravel):
+    revisar vhosts, DocumentRoot y `.htaccess` de public. Un 404 de Laravel
+    se ve distinto (página de error de Laravel).
+16. (Conv. 27, M12) En httpd-vhosts.conf usar barras `/` en rutas Windows,
+   comillas si hay espacios, `AllowOverride All` + `Require all granted`, y
+   reiniciar Apache con Stop/Start (reload no siempre toma vhosts nuevos).
+
+---
+
+## 6. ERRORES YA RESUELTOS (NO REPETIR)
+
+- "Ruta [login] no definida" en /admin/*: se resolvió con el
+  redirectGuestsTo CONDICIONAL en bootstrap/app.php (ver sección 2, M12).
+  EL CONTEXTO ANTERIOR QUE DECÍA QUE YA EXISTÍA DESDE EL M5 ESTABA
+  EQUIVOCADO — no estaba en ningún lado.
+- 404 crudo de Apache ("Extraviado") en demo.facturadorsv.test: faltaban los
+  VirtualHosts en httpd-vhosts.conf (sólo había ejemplos comentados). Se
+  crearon los dos vhosts y se reinició Apache.
+- "Attempt to assign property on null" al resetear password por tinker:
+  era porque el tenant NO tenía usuarios (check.txt devolvía `[]`) — no
+  había nada que resetear; la salida correcta era la pantalla /setup.
+- Namespaces stancl v3.10 híbridos: managers en TenantDatabaseManagers,
+  contrato TenantWithDatabase en Contracts, trait HasDatabase en
+  Database\Concerns.
+- Limpieza de tenants huérfanos: SIEMPRE por SQL directo (crear el tenant
+  dispara jobs que crean la BD; borrar por modelo deja basura y errores).
+- Si una tabla existe pero su migración no está en tenant_xxx.migrations,
+  insertar el registro a mano en esa tabla.
+- hosts de Windows se editan como administrador:
+  `127.0.0.1 facturadorsv.test demo.facturadorsv.test`.
+- MH rechazó FE a consumidor final por `codActividad` (min 5) y `telefono`
+  (min 8) vacíos → defaults al guardar CF (ver contexto del M11).
+- Receptor CF aparecía en el select de CCF: tenía un NRC falso ("1234567")
+  guardado antes del ajuste del formulario; el filtro es por NRC+actividad,
+  no por tipo. Se limpió con update(['nrc' => null]).
+
+---
+
+## 7. FLUJO DE TRABAJO CON EL USUARIO (importante)
+
+- El usuario trabaja en Windows/PowerShell, copia y pega archivos a mano.
+- **Formato de entrega que exige**: MINIMALISTA. "No me des todo el módulo,
+  solo los archivos que necesito corregir. Mejor dime: reemplaza el archivo
+  xxxx/xxxxx/xxxx.php". NUNCA volcar un módulo entero; dar pasos numerados
+  con: ruta exacta del archivo, qué reemplazar (o crear), y el snippet
+  exacto. Si hay ambigüedad sobre nombres de propiedades, pedirle que adjunte
+  el archivo ("si tienes dudas o necesitas corroborar algún archivo, pídeme
+  que lo adjunte" — él lo hace).
+- Cuando algo "no funciona", pedir verificaciones concretas numeradas
+  (Select-String, tinker con file_put_contents) en vez de adivinar.
+- Las subidas de archivos a veces tardan o fallan; si el archivo no aparece
+  en la carpeta, pedir que lo re-adjunte.
