@@ -20,6 +20,7 @@ class Documento extends Model
         'estado', 'subtotal', 'iva', 'total',
         'json_dte', 'ruta_json', 'firma_jws', 'ruta_firma',
         'respuesta_mh', 'reintentos', 'fecha_emision',
+        'correo_enviado_en', 'correo_intentos',
     ];
 
     protected $casts = [

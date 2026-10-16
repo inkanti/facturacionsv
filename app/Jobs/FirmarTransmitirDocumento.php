@@ -88,6 +88,13 @@ class FirmarTransmitirDocumento implements ShouldQueue
                     : EstadoDocumento::Rechazado,
                 'respuesta_mh' => $respuesta->toArray(),
             ]);
+
+            // 4. Envío automático al cliente (Módulo 10): solo si quedó validado.
+            // Corre en la misma cola "dte"; el job es idempotente (correo_enviado_en).
+            if ($respuesta->aceptado && config('dte.envio_cliente.activo', true)) {
+                EnviarDocumentoCliente::dispatch($this->tenantId, $documento->id)
+                    ->onQueue('dte');
+            }
         } catch (FallaTransmisionException $e) {
             // Sin conectividad con el MH: contingencia + reintento programado
             Documento::whereKey($this->documentoId)->update([
