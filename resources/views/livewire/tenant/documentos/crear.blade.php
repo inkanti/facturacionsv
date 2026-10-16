@@ -22,7 +22,7 @@
         <select wire:model="receptor_id" style="max-width:480px;">
             <option value="">— Selecciona un receptor —</option>
             @foreach($receptores as $receptor)
-                <option value="{{ $receptor->id }}">{{ $receptor->nombre }} — {{ $receptor->nit }}</option>
+                <option value="{{ $receptor->id }}">{{ $receptor->nombre }} — {{ $receptor->tipo_documento }}-{{ $receptor->num_documento }}</option>
             @endforeach
         </select>
         @error('receptor_id') <div style="color:#991b1b; font-size:.85rem;">{{ $message }}</div> @enderror
