@@ -18,6 +18,10 @@ use App\Enums\EstadoSuscripcion;
 use App\Models\Subscription;
 use App\Models\Tenant;
 
+use Livewire\Livewire;
+use Stancl\Tenancy\Middleware\InitializeTenancyByDomain;
+use Stancl\Tenancy\Middleware\PreventAccessFromCentralDomains;
+
 /**
  * Provider de tenancy de FACTURADOR SV — formato stancl/tenancy v3.10.x.
  *
@@ -92,6 +96,16 @@ class TenancyServiceProvider extends ServiceProvider
                 ['tenant_id' => $tenant->getTenantKey(), 'estado' => EstadoSuscripcion::Trial],
                 ['trial_hasta' => now()->addDays(14)->toDateString()]
             );
+        });
+
+        // Livewire: las peticiones de update también deben resolver el tenant por dominio
+        Livewire::setUpdateRoute(function ($handle) {
+            return Route::post('/livewire/update', $handle)
+                ->middleware([
+                    'web',
+                    InitializeTenancyByDomain::class,
+                    PreventAccessFromCentralDomains::class,
+                ]);
         });
 
     }

@@ -22,6 +22,16 @@
     $json = $documento->json_dte ?? [];
     $emisorData = $json['emisor'] ?? [];
     $resp = $documento->respuesta_mh['raw'] ?? [];
+
+    // Nombre oficial del documento según su tipo (CAT-001)
+    $nombresDte = [
+        '01' => 'FACTURA ELECTRÓNICA',
+        '03' => 'COMPROBANTE DE CRÉDITO FISCAL',
+        '05' => 'NOTA DE CRÉDITO',
+        '06' => 'NOTA DE DÉBITO',
+    ];
+    $tipoDte = $json['identificacion']['tipoDte'] ?? $documento->tipo_documento ?? '';
+    $nombreDocumento = $nombresDte[$tipoDte] ?? 'DOCUMENTO TRIBUTARIO ELECTRÓNICO';
 @endphp
 
 <table class="header">
@@ -33,7 +43,7 @@
             Tel: {{ $emisorData['telefono'] ?? '—' }} · {{ $emisorData['correo'] ?? '' }}
         </td>
         <td class="right">
-            <strong>{{ $json['identificacion']['tipoDte'] === '03' ? 'COMPROBANTE DE CRÉDITO FISCAL' : 'DOCUMENTO TRIBUTARIO ELECTRÓNICO' }}</strong><br>
+            <strong>{{ $nombreDocumento }}</strong><br>
             N° Control: {{ $documento->numero_control }}<br>
             Código Generación: {{ $documento->codigo_generacion }}<br>
             Fecha: {{ optional($documento->fecha_emision)->format('d/m/Y H:i') }}

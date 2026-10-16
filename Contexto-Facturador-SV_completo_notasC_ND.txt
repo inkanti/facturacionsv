@@ -1,0 +1,597 @@
+FACTURADOR SV — Contexto del proyecto
+=====================================
+
+Documento vivo: resume lo construido, las decisiones tomadas y los aprendizajes.
+Última actualización: cierre de Módulos 0-5 + migración Livewire + soporte
+FE 01/NC 05/ND 06 con validación schema real (2026-10-16).
+
+------------------------------------------------------------
+1. QUÉ ES EL PROYECTO
+------------------------------------------------------------
+SaaS multi-tenant de facturación electrónica para El Salvador, dirigido a
+pequeños emprendedores que se están formalizando ante el Ministerio de
+Hacienda (MH).
+
+- Uno o varios negocios se conectan de manera simultánea, cada uno con su
+  propia base de datos.
+- La integración con el MH no se toca directamente: todo pasa por la
+  interfaz App\Contracts\ProveedorDte con dos implementaciones
+  (ProveedorDteSimulado para desarrollo, ProveedorDteMH para producción,
+  ya construido pero inactivo hasta tener credenciales).
+- Aún no hay acceso al ambiente de pruebas del MH: la emisión funciona con
+  el proveedor simulado, pero el JSON se valida contra los JSON Schema
+  oficiales v4 del MH antes de "firmar".
+
+------------------------------------------------------------
+2. ESTADO ACTUAL — MÓDULOS 0 A 5 CERRADOS Y VERIFICADOS
+------------------------------------------------------------
+
+MÓDULO 0: Fundaciones multi-tenant
+- BD central facturador_central (tablas tenants, domains del paquete +
+  columna personalizada name).
+- BD por negocio con prefijo tenant_ (tenant_demo), creada y migrada
+  automáticamente al crear el tenant (hook TenantCreated: CreateDatabase +
+  MigrateDatabase, sincrónicos).
+- Resolución de tenant por dominio: demo.facturadorsv.test -> tenant demo.
+  Dominios centrales: facturadorsv.test, localhost, 127.0.0.1.
+- Cambio de conexión transparente al contexto del tenant.
+- Disco aislado por tenant (storage/tenant{id}/... base para el .p12).
+- Hosts locales (Windows, como administrador, en
+  C:\Windows\System32\drivers\etc\hosts):
+  127.0.0.1 facturadorsv.test demo.facturadorsv.test
+- Acceso dev: php artisan serve -> http://demo.facturadorsv.test:8000
+
+MÓDULO 1: Configuración del emisor
+- Tablas de tenant: emisores, certificados, credenciales_mh (+ users).
+- Emisor demo: NIT 06141804941012, ambiente 00 (pruebas).
+- Certificado .p12 cargado en DISCO (nunca en BD); en BD solo ruta relativa
+  y contraseña cifrada (cast encrypted).
+- Credenciales del MH (NIT + contraseña) cifradas con cast encrypted.
+- Servicio App\Services\Emisor\GestorCertificado: un solo certificado activo
+  por emisor; elimina el archivo al borrar el registro.
+
+MÓDULO 2: Catálogos
+- Tablas: receptores y productos (+ seeders demo idempotentes con
+  updateOrCreate).
+- Productos: IVA como enum App\Enums\TipoIva (gravado 13% / exento /
+  excluido). Precio guardado SIN IVA (precio base); se calcula al emitir.
+- Catálogos del MH guardados como códigos (tipo de documento receptor CAT-022,
+  unidad de medida CAT-014 como ENTERO, departamento/municipio/distrito).
+- Receptores: NRC, desc_actividad y distrito agregados (necesarios para CCF).
+
+MÓDULO 3: Emisión de DTE
+- Tablas: documentos y documento_detalles (snapshot del receptor y de cada
+  ítem: sobreviven a cambios/borrados del catálogo).
+- Estados (convención 8): borrador -> firmado -> transmitido ->
+  validado / rechazado / contingencia. Columna reintentos para contingencia.
+- numero_control y codigo_generacion (UUID v4 EN MAYÚSCULAS) se asignan AL
+  EMITIR, no al crear el borrador. Borrador con numero_control = en cola.
+- Flujo: EmisorDocumentos::emitir() -> job FirmarTransmitirDocumento (cola
+  redis "dte") -> validación local contra JSON Schema oficial v4 ->
+  generación JSON (GeneradorJsonDte, estructura oficial v4) -> copia en disco
+  -> firma (proveedor) -> copia firma en disco -> transmisión (proveedor) ->
+  estado final. En validado se guarda la copia para el receptor
+  (identificacion + firmaElectronica + selloRecibido, manual 6.5).
+- Contingencia: FallaTransmisionException -> estado contingencia + job
+  ReintentarTransmision con backoff exponencial (tope 240 min, ~24 h).
+- Tenancy en la cola: el job recibe tenantId y hace
+  tenancy()->initialize() en el handle y tenancy()->end() en finally.
+- IVA del resumen va en tributos con código "20" (CAT-015). No existe
+  campo totalIva ni ivaItem en el schema v4.
+- AlmacenDte: dtes/AAAA/MM/{codigo_generacion}.json | .jws | .receptor.json
+  (retención 10 años, convención 5).
+
+MÓDULO 4: Consulta y descarga
+- Rutas tenant: documentos (index, show, json, pdf, consultar-mh).
+- Controlador App\Http\Controllers\Tenant\DocumentoController:
+  listado con filtros (estado, búsqueda por N° control/receptor) + paginación;
+  detalle con respuesta MH; descarga JSON oficial; PDF con representación
+  gráfica; consulta al MH (servicio consultadte).
+- PDF (barryvdh/laravel-dompdf): datos del emisor, receptor, detalle,
+  totales, total en letras (App\Services\Dte\NumeroALetras), sello del MH y
+  QR de consulta pública (chillerlan/php-qrcode v5, salida 'png').
+- Vista provisional Blade; decisión Livewire 3 vs Inertia+Vue pendiente.
+
+MÓDULO 5: Suscripciones y admin central
+- Tablas CENTRALES (facturador_central): planes, suscripciones,
+  admin_users. Migraciones en database/migrations/ (raíz, no tenant/).
+- Enum App\Enums\EstadoSuscripcion: trial, activa, vencida, suspendida,
+  cancelada (permiteAcceso() solo trial/activa).
+- App\Models\Plan (tabla planes, $table explícito) y App\Models\Subscription
+  (tabla suscripciones): modelos de BD CENTRAL que asignan la conexión en el
+  constructor con config('tenancy.database.central_connection', 'mysql') —
+  así sobreviven al cambio de conexión default del tenancy.
+- App\Models\AdminUser: autenticable, guard "admin" (config/auth.php:
+  guards.admin session + providers.admins), cast password => hashed.
+- Vigencia: Subscription::estaVigente() valida estado Y fecha en caliente.
+  OJO: activa manda vence_en; trial manda trial_hasta (vence_en se ignora).
+- Trial automático: Tenant::created en el boot de TenancyServiceProvider
+  crea suscripción trial de 14 días (firstOrCreate).
+- Bloqueo: middleware alias 'suscripcion.activa' (EnsureSubscriptionActiva),
+  registrado con Router::aliasMiddleware en el boot de AppServiceProvider.
+  Aplicado en routes/tenant.php SOLO a las rutas de negocio; la ruta
+  suscripcion.estado queda fuera del bloqueo (siempre accesible).
+- Panel admin (dominio central facturadorsv.test/admin): login propio
+  (Admin\Auth\LoginController), dashboard con totales e ingreso mensual
+  estimado, gestión de tenants (asignar plan cierra la anterior como
+  cancelada, extender suma meses desde vence_en futuro si aplica, suspender,
+  reactivar = hoy + 1 mes si ya venció, iniciar trial) y edición de planes.
+- Vencimientos: comando app/Console/Commands/ProcesarSuscripcionesVencidas
+  (suscripciones:procesar-vencidas), programado dailyAt('00:30') en
+  routes/console.php. En local no corre solo (sin cron); se corre manual.
+- Primer admin creado por tinker con AdminUser::firstOrCreate (el cast
+  hashed hace el hash de la contraseña en texto plano automáticamente).
+- redirectGuestsTo(fn () => route('admin.login')) en bootstrap/app.php:
+  sin esto, auth:admin redirige a route('login') inexistente -> error.
+
+MÓDULO 6: Migración a Livewire (decisión de UI tomada: Livewire 4.4.7)
+- Se eligió Livewire sobre Inertia+Vue; migración completa en 4 fases
+  (A: instalación, B: panel admin, C: vistas tenant, D: pantalla de emisión).
+- OJO: Livewire 4 -> wire:model SIMPLE ES DIFERIDO (solo wire:model.live /
+  wire:model.live.debounce.300ms son en vivo). Esto costó un bug de totales.
+- Componentes full-page: render()->layout('tenant.layout') /
+  layout('admin.layout'); los layouts usan {{ $slot ?? '' }} (y @yield
+  para las vistas blade clásicas que queden).
+- FIX CRÍTICO tenancy+Livewire: Livewire::setUpdateRoute() en el boot de
+  TenancyServiceProvider envolviendo /livewire/update con [web,
+  InitializeTenancyByDomain, PreventAccessFromCentralDomains]; sin esto los
+  POST de Livewire caían en la BD central ("Table facturador_central.documentos
+  doesn't exist").
+- Admin: app\Livewire\Admin\Tenants\Lista.php (+ vista) y Gestion.php
+  (buscador live, acciones por tenant con wire:confirm).
+- Tenant: app\Livewire\Tenant\Documentos\Lista.php, Mostrar.php, Crear.php
+  (emisión con totales en vivo), CrearNota.php (NC/ND).
+- Con WithPagination: resetPage() al cambiar filtros.
+
+MÓDULO 7: Soporte FE (01) + ValidadorDte real contra schemas oficiales
+- La FE usa schema V2 (fe-f-v2.json, version=2), NO v4: receptor con
+  tipoDocumento/numDocumento, exige ivaItem y totalIva, PROHÍBE ivaPerci,
+  codEstable/codPuntoVenta distintos, resumen sin pagos/subTotal/saldoFavor.
+  IMPORTANTE: la única familia v2 es la FE (01); NC/ND/NR/CCF son v4.
+- Validación local REAL: app\Services\Dte\ValidadorDte con OPIS/JSON-SCHEMA
+  (los schemas del MH son draft-07; justinrainbow solo entiende draft-04 y
+  NO SIRVE). El job valida con json_decode($json) SIN assoc (opis exige
+  stdClass: un arreglo PHP asociativo se interpreta como JSON-array y falla
+  "Array value found, but an object is required").
+  Errores extraídos con Opis\JsonSchema\Errors\ErrorFormatter::format().
+- Si la validación falla: estado rechazado + respuesta_mh.validacion_local
+  con la ruta exacta del campo (formato /cuerpoDocumento/0/...).
+- BUG CORREGIDO (costó un rechazo real): receptor_snapshot NO estaba en el
+  $fillable de Documento: la asignación masiva lo descartaba y el generador
+  armaba el receptor con todo null. Ahora está en fillable + cast array, y
+  el generador tiene respaldo con el receptor vivo (datosReceptor()).
+- Correlativo numero_control: MAX(secuencia)+1 sobre los últimos 15 chars
+  (count()+1 falla con huecos por borradores/rechazados eliminados).
+
+MÓDULO 8: Notas de crédito (05) y débito (06)
+- Solo sobre CCF (03) Validado (el receptor de la FE de consumidor final
+  no cumple el receptor v4 de notas). documento_padre_id (índice, sin FK).
+- EmisorDocumentos::crearBorradorNota(padre, tipo, items) reutiliza el
+  pipeline (borrador -> cola -> validación -> firma -> transmisión).
+- Diferencias schema NC/ND vs CCF (todas en GeneradorJsonDte):
+  identificacion exige "fusion"; emisor PROHÍBE codEstable/codPuntoVenta;
+  receptor con tipoDocumento/numDocumento (no "nit") + direccion completa
+  requerida; cuerpo exige numeroDocumento (n° control del padre) por línea,
+  totalIva/ivaPerci/ivaRete por línea y PROHÍBE psv; resumen sin descu* /
+  subTotal / saldoFavor / pagos, con totalIva y codigoRetencionMH; la ND
+  además exige numPagoElectronico. NO enviar otrosDocumentos.
+- UI: botones "Crear nota de crédito/débito" en el detalle del CCF validado;
+  pantalla CrearNota precarga las líneas del padre; cantidades ajustables,
+  nunca mayores que las del documento afectado.
+
+------------------------------------------------------------
+3. DOCUMENTACIÓN OFICIAL DEL MH OBTENIDA (2026-10-12)
+------------------------------------------------------------
+Archivos: Catálogos - Facturación Electrónica.xlsx/pdf (V 1.1),
+Manual Técnico v2.0, Manual Funcional V 2.0, y JSON Schema v4:
+fe-ccf-v4, fe-nc-v4, fe-nd-v4, fe-nr-v4, contingencia-schema-v4
+(los 5 schemas viven en resources/mh-schemas/).
+
+Aprendizajes clave del Manual Técnico v2.0:
+- Autenticación: POST {base}/seguridad/auth (form-urlencoded: user, pwd)
+  -> body.token ya incluye "Bearer ". Vigencia: 48 h pruebas / 24 h
+  producción -> se cachea en Redis (margen 2 h).
+- Recepción uno a uno: POST {base}/fesv/recepciondte. Body: ambiente,
+  idEnvio (correlativo a discreción), version, tipoDte, documento (JWS),
+  codigoGeneracion. Respuesta: estado (PROCESADO/RECHAZADO), selloRecibido,
+  fhProcesamiento, clasificaMsg, codigoMsg, descripcionMsg, observaciones[].
+  Códigos de error 100-116 (107/108 = token inválido -> re-autenticar).
+- Consulta DTE: POST {base}/fesv/recepcion/consultadte (nitEmisor, tipoDte,
+  codigoGeneracion).
+- Eventos: /fesv/contingencia y /fesv/anulardte (se transmiten ANTES que
+  los documentos afectados). Lotes: /fesv/recepcionlote (máx. 100 DTE).
+- URLs exactas SIN barra final.
+- Firma: el MH prescribe un servicio LOCAL (svfe-api-firmador, Docker) en
+  POST {url}/firmardocumento/ con nit, active, passwordPri, dteJson ->
+  devuelve el JWS. ProveedorDteMH ya implementa esto.
+- Archivo para el receptor: identificacion + firmaElectronica +
+  selloRecibido (estructura exacta, regla 6.5).
+- QR público: https://admin.factura.gob.sv/consultaPublica?ambiente=XX&
+  codGen={UUID}&fechaEmi={YYYY-MM-DD}.
+
+Aprendizajes clave de los schemas v4 + catálogos:
+- identificacion.version = 4 (const). tipoContingencia y motivoContin son
+  OBLIGATORIAS (anulables). Claves documentoRelacionado, otrosDocumentos,
+  ventaTercero y apendice deben EXISTIR (anulables).
+- numeroControl: DTE-{tipo}-{M|B|S|P}{codEstable 3}P{codPuntoVenta 3}-
+  {secuencia 15} (31 chars, regex oficial). Letra por CAT-009:
+  01 Sucursal=S, 02 Casa Matriz=M, 04 Bodega=B, 07 Patio=P.
+- codigoGeneracion: UUID v4 en MAYÚSCULAS ([A-F0-9]).
+- uniMedida: ENTERO 1-99 (CAT-014: 59=Unidad, 99=Otra). tipoItem:
+  1=Bienes, 2=Servicios (CAT-011).
+- Tipo de documento CAT-002 (OJO, corrige códigos viejos):
+  01 Factura, 03 CCF, 04 Nota de remisión, 05 Nota de crédito,
+  06 Nota de débito, 07 Comprobante de retención, 08 Comprobante de
+  liquidación, 09 Doc. contable de liquidación, 11 Factura de exportación,
+  14 Factura de sujeto excluido, 15 Comprobante de donación.
+- Tributo IVA = código "20". Retenciones: 22 (1%), C4 (13%), C9.
+- Direcciones (emisor Y receptor) requieren distrito (CAT-008).
+  Departamentos CAT-012 (06=San Salvador), municipios CAT-013
+  (23=San Salvador Centro).
+- Emisor lleva codEstable (4 chars), codPuntoVenta y descActividad.
+- La FE (01) es la ÚNICA en schema v2 (fe-f-v2.json, obtenido del paquete
+  oficial del MH): version=2, receptor tipoDocumento/numDocumento (sin
+  "nit"), exige ivaItem y totalIva, PROHÍBE ivaPerci; resumen sin pagos/
+  subTotal/saldoFavor; si direccion va, sus campos son NO anulables.
+- Notas (05/06): identificacion exige "fusion"; emisor SIN codEstable/
+  codPuntoVenta; receptor tipoDocumento/numDocumento + direccion completa
+  requerida; cuerpo con numeroDocumento del padre + totalIva por línea, sin
+  psv; resumen propio (ver Módulo 8).
+
+------------------------------------------------------------
+4. STACK Y VERSIONES CONFIRMADAS (VERIFICADAS EN EL ENTORNO REAL)
+------------------------------------------------------------
+| Pieza | Versión / decisión |
+| Framework | Laravel 12.x, PHP 8.2 |
+| Paquete tenancy | stancl/tenancy 3.10.x (estructura v3) |
+| Colas/cache | Redis (Memurai como servicio de Windows en dev) + predis/predis |
+| Validación JSON | opis/json-schema (draft-07; justinrainbow quedó obsoleto) |
+| PDF | barryvdh/laravel-dompdf |
+| QR | chillerlan/php-qrcode v5 |
+| UI | Livewire 4.4.7 (migración completa, admin + tenant) |
+| .env (dev) | QUEUE_CONNECTION=redis, CACHE_STORE=redis, REDIS_CLIENT=predis |
+| DTE | DTE_PROVIDER=simulado | mh cuando haya credenciales |
+
+Estructura config tenancy v3: claves de primer nivel tenant_model,
+domain_model, id_generator, central_domains. Eventos en
+App\Providers\TenancyServiceProvider (NO en config/tenancy.php):
+TenantCreated -> CreateDatabase + MigrateDatabase,
+TenancyInitialized -> BootstrapTenancy,
+TenancyEnded -> RevertToCentralContext,
+TenantDeleted -> DeleteDatabase.
+
+Modelo Tenant: implementa Contracts\TenantWithDatabase + traits
+HasDatabase + HasDomains. Managers de BD:
+Stancl\Tenancy\TenantDatabaseManagers\MySQLDatabaseManager (sin
+"Database\" en el namespace). Prefijo BD: tenant_ + id.
+Generador de IDs: Stancl\Tenancy\UUIDGenerator.
+
+------------------------------------------------------------
+5. CONVENCIONES DEL PROYECTO (reglas de arquitectura + aprendizadas)
+------------------------------------------------------------
+1. Todo modelo declara protected $table explícitamente (pluralizador
+   inglés vs. plurales españoles: costó horas de depuración).
+2. Migraciones de tenant en database/migrations/tenant/; corren solas al
+   crear el tenant.
+3. Columnas monetarias: decimal(12,2), jamás float.
+4. Índices en estado/activo y campos de búsqueda en toda tabla de tenant.
+5. DTE nunca solo en BD: también en disco (retención 10 años).
+6. Receptor guardado como snapshot dentro del documento (columna
+   receptor_snapshot JSON + columnas receptor_* mínimas).
+7. numero_control y codigo_generacion (UUID v4 MAYÚSCULAS) se asignan al
+   emitir, no al crear el borrador.
+8. Estados: borrador -> firmado -> transmitido -> validado/rechazado/
+   contingencia.
+9. Certificado .p12 en disco por tenant, nunca en BD; .p12 fuera de git.
+10. Comentarios de código en español; código entregado archivo por archivo
+    con pasos de verificación (artisan/tinker).
+11. Seeders idempotentes (updateOrCreate con clave natural).
+12. Redis solo para colas y cache; nunca como almacenamiento de datos.
+13. Jobs que tocan datos de tenant reciben tenantId y hacen
+    tenancy()->initialize()/end() explícito en handle/finally.
+14. La emisión SIEMPRE pasa por ValidadorDte (schema oficial v4) antes de
+    firmar: un rechazo local es más barato que uno del MH.
+15. NUNCA base64_encode() la salida de chillerlan QRCode::render():
+    devuelve ya un data URI completo (outputBase64=true por defecto en v5).
+16. En tinker de Laravel 11/12 NO hay aliases cortos de facades: usar la
+    clase completa (Illuminate\Support\Facades\Redis::...).
+17. Modelos que viven en la BD central asignan la conexión en el
+    constructor: $this->connection =
+    config('tenancy.database.central_connection', 'mysql'). NUNCA depender
+    de la conexión default (el tenancy la cambia a 'tenant').
+18. En PowerShell los escapes tipo bash (\$s, comillas dobles anidadas) NO
+    funcionan: se comen las comillas o llegan literales a PHP (parse error).
+    Para pruebas puntuales preferir SQL directo (mysql -e "UPDATE ...") o
+    escribir el --execute con comillas simples externas y código PHP sin
+    variables.
+19. queue:work CACHÉA EL CÓDIGO: cualquier cambio en jobs/servicios de cola
+    exige reiniciar el worker (Ctrl+C y de nuevo) o el job corre con código
+    viejo. En dev alternativo: queue:listen (recarga por job, más lento).
+20. justinrainbow/json-schema NO SIRVE para los schemas del MH: son draft-07
+    (exclusiveMinimum numérico). Usar opis/json-schema + json_decode() sin
+    assoc (exige stdClass; ver convención en ValidadorDte).
+21. Toda columna nueva que se escriba por asignación masiva DEBE entrar al
+    $fillable de su modelo; Laravel descarta los demás silenciosamente
+    (bug del receptor_snapshot: el snapshot nunca se guardó).
+22. REGLA DE ORO ante errores de "no se aplicó el cambio": (1) ¿guardé el
+    archivo en la ruta exacta? (2) ¿reinicié el worker? (3) optimize:clear.
+    El 80% de los "bugs" de esta sesión fueron esos tres.
+
+------------------------------------------------------------
+6. NOMBRES REALES DE COLUMNAS (VERIFICADOS CONTRA tenant_demo)
+------------------------------------------------------------
+emisores (OJO: NO usar los nombres asumidos inicialmente):
+  id, nit, nrc, nombre_razon_social (NO "nombre"), nombre_comercial,
+  actividad_economica, actividad_economica_desc (NO "desc_actividad"),
+  tipo_establecimiento, codigo_establecimiento (NO "cod_estable"; 4 chars),
+  direccion (varchar; se usa como complemento si direccion_complemento
+  está vacío), telefono, correo, ambiente (00/01),
+  estado (NO "activo": valor 'activo'/'inactivo') -> scope Emisor::activo(),
+  departamento, municipio, distrito, direccion_complemento,
+  cod_punto_venta, created_at, updated_at.
+certificados: activo, nombre_archivo, password (encrypted).
+
+Lecciones: emisores YA traía nrc, codigo_establecimiento y
+actividad_economica_desc; las migraciones agregan columnas deben usar
+guardas Schema::hasColumn() por si la columna ya existe con otro nombre.
+
+------------------------------------------------------------
+7. ARCHIVOS DEL PROYECTO
+------------------------------------------------------------
+Modificados:
+- config/tenancy.php, bootstrap/providers.php, routes/tenant.php,
+  routes/web.php, .env, .gitignore, app/Providers/AppServiceProvider.php
+  (binding ProveedorDte), app/Models/Emisor.php (scope activo + fillables),
+  app/Services/Dte/GeneradorJsonDte.php (v4 oficial).
+
+Creados — Módulo 2:
+- app/Enums/TipoIva.php
+- app/Models/Receptor.php, app/Models/Producto.php
+- database/migrations/tenant/2026_10_13_100004_create_receptores_table.php
+- database/migrations/tenant/2026_10_13_100005_create_productos_table.php
+- database/seeders/Tenant/ReceptoresDemoSeeder.php
+- database/seeders/Tenant/ProductosDemoSeeder.php
+
+Creados — Módulo 3:
+- app/Enums/EstadoDocumento.php, app/Enums/TipoDocumento.php
+- app/Models/Documento.php, app/Models/DocumentoDetalle.php
+- database/migrations/tenant/2026_10_13_100006_create_documentos_table.php
+- database/migrations/tenant/2026_10_13_100007_create_documento_detalles_table.php
+- app/Contracts/ProveedorDte.php
+- app/Exceptions/FallaTransmisionException.php
+- app/Services/Dte/RespuestaMh.php
+- app/Services/Dte/ProveedorDteSimulado.php
+- app/Services/Dte/ProveedorDteMH.php (real: firma local MH + recepción +
+  consulta; listo, espera credenciales)
+- app/Services/Dte/ClienteApiMh.php (token Bearer cacheado en Redis)
+- app/Services/Dte/GeneradorJsonDte.php (schema v4 + NumeroALetras)
+- app/Services/Dte/ValidadorDte.php (justinrainbow; mapa tipoDte->schema)
+- app/Services/Dte/AlmacenDte.php (guarda/lee copias en disco)
+- app/Services/Dte/NumeroALetras.php
+- app/Services/Dte/EmisorDocumentos.php (crearBorrador/emitir/totales/
+  snapshot/numeroControl oficial)
+- app/Jobs/FirmarTransmitirDocumento.php
+- app/Jobs/ReintentarTransmision.php
+- config/dte.php
+
+Creados — Correcciones tras recibir docs oficiales del MH:
+- database/migrations/tenant/2026_10_14_100008_add_snapshot_y_campos_detalle.php
+- database/migrations/tenant/2026_10_14_100009_add_campos_mh_receptores.php
+- database/migrations/tenant/2026_10_14_100010_fix_unidad_medida_productos.php
+- database/migrations/tenant/2026_10_14_100011_add_campos_mh_emisores.php
+  (con guardas hasColumn: nrc/cod_estable ya existían con otros nombres)
+- database/migrations/tenant/2026_10_14_100012_limpieza_campos_emisores.php
+  (borra cod_estable/desc_actividad redundantes, agrega departamento,
+  municipio, direccion_complemento)
+- resources/mh-schemas/ (fe-f-v2.json, fe-ccf-v4.json, fe-nc-v4.json,
+  fe-nd-v4.json, fe-nr-v4.json, contingencia-schema-v4.json)
+
+Creados — Módulo 6 (Livewire 4):
+- app/Livewire/Admin/Tenants/Lista.php + Gestion.php
+- resources/views/livewire/admin/tenants/lista.blade.php, gestion.blade.php
+- resources/views/tenant/layout.blade.php
+- app/Livewire/Tenant/Documentos/Lista.php, Mostrar.php, Crear.php
+- resources/views/livewire/tenant/documentos/lista.blade.php,
+  mostrar.blade.php, crear.blade.php
+
+Creados — Módulos 7 y 8 (FE + validación real + NC/ND):
+- app/Livewire/Tenant/Documentos/CrearNota.php
+- resources/views/livewire/tenant/documentos/crear-nota.blade.php
+- database/migrations/tenant/2026_10_15_100001_add_documento_padre_to_documentos_table.php
+
+Modificados — Módulos 6-8:
+- app/Providers/TenancyServiceProvider.php (Livewire::setUpdateRoute)
+- app/Services/Dte/GeneradorJsonDte.php (FE v2 + NC/ND; receptorFe,
+  receptorNota, datosReceptor con respaldo)
+- app/Services/Dte/ValidadorDte.php (opis/json-schema, draft-07)
+- app/Services/Dte/EmisorDocumentos.php (crearBorradorNota, attachDetalles,
+  correlativo por máximo)
+- app/Models/Documento.php (documento_padre_id, padre/notas,
+  receptor_snapshot en fillable + cast)
+- app/Jobs/FirmarTransmitirDocumento.php (validación local pre-firma)
+- resources/views/tenant/documentos/pdf.blade.php (título dinámico por tipo)
+- routes/tenant.php (ruta documentos.notas.crear)
+
+Creados — Módulo 4:
+- app/Http/Controllers/Tenant/DocumentoController.php
+- resources/views/tenant/documentos/index.blade.php
+- resources/views/tenant/documentos/show.blade.php
+- resources/views/tenant/documentos/pdf.blade.php
+
+Creados — Módulo 5:
+- database/migrations/2026_10_14_000002_create_planes_table.php
+- database/migrations/2026_10_14_000003_create_suscripciones_table.php
+- database/migrations/2026_10_14_000004_create_admin_users_table.php
+- app/Enums/EstadoSuscripcion.php
+- app/Models/Plan.php, app/Models/Subscription.php, app/Models/AdminUser.php
+- database/seeders/PlanesDemoSeeder.php (basico/profesional/empresarial)
+- app/Http/Middleware/EnsureSubscriptionActiva.php (alias suscripcion.activa)
+- app/Http/Controllers/Tenant/SuscripcionController.php
+- resources/views/tenant/suscripcion/estado.blade.php
+- app/Http/Controllers/Admin/Auth/LoginController.php
+- app/Http/Controllers/Admin/DashboardController.php
+- app/Http/Controllers/Admin/TenantController.php
+- app/Http/Controllers/Admin/PlanController.php
+- app/Console/Commands/ProcesarSuscripcionesVencidas.php
+- resources/views/admin/layout.blade.php, dashboard.blade.php,
+  auth/login.blade.php, tenants/index.blade.php, tenants/show.blade.php,
+  planes/index.blade.php, planes/edit.blade.php
+
+Modificados — Módulo 5:
+- config/auth.php (guard admin + provider admins + password broker)
+- bootstrap/app.php (redirectGuestsTo -> admin.login)
+- routes/web.php (grupo /admin con guest:admin y auth:admin)
+- routes/tenant.php (ruta suscripcion.estado fuera del bloqueo; rutas de
+  negocio dentro de middleware suscripcion.activa; closure de welcome
+  vuelve a pasar $tenant y $database a la vista)
+- app/Providers/AppServiceProvider.php (boot: aliasMiddleware)
+- app/Providers/TenancyServiceProvider.php (boot: Tenant::created -> trial)
+
+------------------------------------------------------------
+8. RIESGOS TÉCNICOS YA RESUELTOS (NO REPETIR)
+------------------------------------------------------------
+- Config cacheada vieja: si algo "no se aplica", php artisan config:clear.
+- Limpieza de tenants huérfanos: siempre por SQL directo (evita disparar
+  jobs con BD inexistente).
+- Namespaces del paquete tenancy: verificar contra vendor/stancl/tenancy;
+  la v3.10 es híbrida (managers en TenantDatabaseManagers, contrato en
+  Contracts\TenantWithDatabase, trait en Database\Concerns\HasDatabase).
+- Cache por tenant: v3 usa tags; drivers file/database no los soportan ->
+  CACHE_STORE=array en dev / redis en producción.
+- Registro de migraciones vs. tablas reales: si una tabla existe pero su
+  migración no está en tenant_xxx.migrations, insertar el registro a mano.
+- Migraciones que agregan columnas: usar guardas Schema::hasColumn();
+  emisores ya traía nrc/codigo_establecimiento/actividad_economica_desc.
+- Windows dev: Memurai como servicio Redis (instalador .msi, puerto 6379);
+  verificar con Test-NetConnection 127.0.0.1 -Port 6379.
+- hosts: editar como administrador, agregar
+  "127.0.0.1 facturadorsv.test demo.facturadorsv.test".
+- chillerlan/php-qrcode v5: no existen QRCode::OUTPUT_* (usar string 'png');
+  render() devuelve data URI completo: NO base64_encode de nuevo.
+- dompdf + QR: pasar el data URI directo al <img>; evitar redimensionar
+  por CSS (usar scale del QR para el tamaño final).
+- Secuencia de numeroControl: cuenta documentos con numero_control not null
+  (los borradores huérfanos no consumen correlativo).
+- PHP CLI vs web: verificar extensiones en ambos (gd para el QR).
+- Módulo 5: "Ruta [login] no definida" al entrar sin sesión a /admin/*:
+  el auth:admin redirige a route('login') por defecto; se define
+  redirectGuestsTo en bootstrap/app.php apuntando a admin.login.
+- Módulo 5: reescribir routes/tenant.php sin pasar $tenant/$database al
+  closure de welcome rompe la vista (500 por variables indefinidas): la
+  vista tenant.welcome los usa.
+- Módulo 5: "View [admin.planes.index] not found" = la carpeta planes se
+  creó DENTRO de tenants (admin\tenants\planes). Debe quedar en
+  admin\planes (mismo nivel que tenants y auth).
+- Módulo 5: probar vencimiento con vence_en en una suscripcion TRIAL no
+  bloquea nada: en trial la fecha que manda es trial_hasta.
+- Livewire 4: "el valor aparece en cero / no recalcula" = wire:model simple
+  es DIFERIDO en v4; usar wire:model.live(.debounce) para totales en vivo.
+- "Table facturador_central.documentos doesn't exist" al escribir en un
+  componente Livewire = falta Livewire::setUpdateRoute() con middlewares de
+  tenancy (ver Módulo 6).
+- Validación local: "Array value found, but an object is required" =
+  json_decode con assoc=true pasado al validador; quitar el flag.
+- "Use of exclusiveMinimum requires presence of minimum" = librería
+  draft-04 contra schema draft-07: cambiar a opis/json-schema.
+- opis 4.x: ValidationError ya no tiene dataPointer(); usar
+  Opis\JsonSchema\Errors\ErrorFormatter::format($error, true).
+- Documento queda en Borrador para siempre = worker de cola detenido
+  (Borrador + numero_control = "en cola"). Contingencia = excepción en
+  firma/transmisión o worker muerto a mitad del job.
+- phpMyAdmin: siempre seleccionar la BD del tenant (tenant_demo) o calificar
+  "FROM tenant_demo.documentos"; lo contrario da 1146 o "0 rows".
+- El correlativo por count()+1 colisionó (Duplicate entry numero_control):
+  huecos por borradores eliminados. Usar max()+1 (ver Módulo 7).
+
+------------------------------------------------------------
+9. ROADMAP
+------------------------------------------------------------
+| 0 Fundaciones multi-tenant | CERRADO |
+| 1 Configuración del emisor | CERRADO |
+| 2 Catálogos (receptores/productos/IVA) | CERRADO |
+| 3 Emisión de DTE (cola, schema v4, contingencia) | CERRADO |
+| 4 Consulta y descarga (listados, JSON/PDF, QR, consultadte) | CERRADO |
+| 5 Suscripciones y admin | CERRADO | Planes, suscripciones,
+  admin_users en facturador_central; panel admin (guard admin), bloqueo
+  por suscripción, trial automático 14 días, comando de vencimientos |
+| 6 Migración UI a Livewire 4 | CERRADO | Admin (Lista/Gestion tenants) +
+  tenant (Lista/Mostrar/Crear documentos, suscripción); setUpdateRoute |
+| 7 Soporte FE 01 + validación schema real | CERRADO | fe-f-v2.json,
+  ValidadorDte (opis, draft-07), fix receptor_snapshot fillable,
+  correlativo por máximo, título PDF dinámico |
+| 8 Notas de crédito (05) y débito (06) | CERRADO | Solo sobre CCF validado;
+  documento_padre_id; shape NC/ND (fusion, receptor tipoDocumento, IVA por
+  línea, documentoRelacionado); pantalla CrearNota |
+| 9 ProveedorDteMH real activado | Pendiente | Ya construido; requiere
+  credenciales ambiente de pruebas + svfe-api-firmador en Docker |
+| 10 Envío automático de documentos al cliente | Pendiente | Mailable + cola
+  al validar (PDF + JSON al correo del receptor) |
+| 11 Cuentas por cobrar | Pendiente | Pagos, saldos, estado de cuenta |
+| 12 Anexo de IVA | Pendiente | Reporte mensual para declaración |
+| 13 Notas sobre FE (01) | Pendiente | Exigir receptor completo en FE para
+  poder notarla (schema v4 de notas pide NRC/actividad/dirección) |
+
+------------------------------------------------------------
+10. PENDIENTE DE CONSEGUIR (DEL MH / DEL NEGOCIO)
+------------------------------------------------------------
+1. Credenciales del ambiente de pruebas del MH (usuario + contraseña) ->
+  activar DTE_PROVIDER=mh y probar contra apitest.dtes.mh.gob.sv.
+2. Schema de Factura de sujeto excluido (14) si se ofrece (mismo paquete
+   oficial del MH: svfe-json-schemas.zip / mirror GitHub herson/dte-json-schemas).
+3. (Producción) svfe-api-firmador del MH corriendo en Docker y
+   DTE_BASE_URL=https://api.dtes.mh.gob.sv.
+4. Decisión comercial: qué módulos de negocio ofrecer (ver roadmap 10-13).
+
+------------------------------------------------------------
+11. COMANDOS DE VERIFICACIÓN RÁPIDA
+------------------------------------------------------------
+# Crear/recrear tenant demo (crea tenant_demo + migra)
+php artisan db:seed --class=TenantDemoSeeder
+
+# Migrar y sembrar
+php artisan tenants:migrate --tenants=demo
+php artisan tenants:seed --class="Database\Seeders\Tenant\ReceptoresDemoSeeder" --tenants=demo
+php artisan tenants:seed --class="Database\Seeders\Tenant\ProductosDemoSeeder" --tenants=demo
+
+# Redis
+php artisan tinker --execute="var_dump(Illuminate\Support\Facades\Redis::connection()->ping());"
+
+# Worker de la cola (terminal dedicada)
+php artisan queue:work --queue=dte
+
+# Emitir de prueba
+php artisan tinker --execute="tenancy()->initialize(App\Models\Tenant::find('demo')); $r = App\Models\Receptor::whereNotNull('nrc')->firstOrFail(); $p = App\Models\Producto::where('codigo','CAF-001')->firstOrFail(); $d = app(App\Services\Dte\EmisorDocumentos::class)->crearBorrador($r, [['producto_id' => $p->id, 'cantidad' => 2]]); $d->update(['tipo_documento' => '03']); app(App\Services\Dte\EmisorDocumentos::class)->emitir($d); echo 'Emitido id: ', $d->id, PHP_EOL;"
+
+# Verificar resultado
+php artisan tinker --execute="tenancy()->initialize(App\Models\Tenant::find('demo')); $d = App\Models\Documento::latest('id')->first(); echo $d->numero_control, ' | ', $d->estado->value, ' | $', $d->total, PHP_EOL;"
+
+# Verificación SQL
+mysql -u root -e "SHOW TABLES IN tenant_demo;"
+mysql -u root -e "SELECT id, numero_control, estado, subtotal, iva, total FROM tenant_demo.documentos ORDER BY id DESC LIMIT 3;"
+
+# Contingencia simulada: DTE_SIMULAR_CONTINGENCIA=true + config:clear
+# Web: http://demo.facturadorsv.test:8000/documentos
+
+# Módulo 5: suscripciones
+mysql -u root -e "SELECT id, tenant_id, estado, plan_id, vence_en, trial_hasta FROM facturador_central.suscripciones ORDER BY id DESC LIMIT 3;"
+php artisan suscripciones:procesar-vencidas   # marca vencidas (correr a diario)
+# Web admin: http://facturadorsv.test:8000/admin/login (admin@facturadorsv.test)
+# Web tenant: http://demo.facturadorsv.test:8000/suscripcion
+
+------------------------------------------------------------
+12. CONTEXTO MH (EL SALVADOR) — REFERENCIA RÁPIDA
+------------------------------------------------------------
+- Ambiente pruebas = 00, producción = 01.
+- Base URLs: pruebas https://apitest.dtes.mh.gob.sv,
+  producción https://api.dtes.mh.gob.sv (sin barra final en endpoints).
+- Endpoints: /seguridad/auth, /fesv/recepciondte, /fesv/recepcionlote,
+  /fesv/recepcion/consultadte, /fesv/contingencia, /fesv/anulardte.
+- Headers en servicios: Authorization (Bearer token), User-Agent,
+  Content-Type application/json.
+- Token: 48 h (pruebas) / 24 h (prod); cachear en Redis.
+- Firma: JWS compacto del JSON del DTE, hecho por el servicio local
+  svfe-api-firmador del MH (POST {firma_url}/firmardocumento/).
+- IVA estándar: 13% sobre ventas gravadas (tributo código "20").
+- QR público: admin.factura.gob.sv/consultaPublica?ambiente=&codGen=&fechaEmi=
+- Documento que se entrega al receptor: JSON con identificacion +
+  firmaElectronica + selloRecibido, más representación gráfica (PDF).

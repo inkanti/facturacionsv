@@ -9,12 +9,14 @@ use App\Models\Documento;
 use App\Models\Tenant;
 use App\Services\Dte\AlmacenDte;
 use App\Services\Dte\GeneradorJsonDte;
+use App\Services\Dte\ValidadorDte;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
 use Illuminate\Support\Facades\Log;
+use InvalidArgumentException;
 
 class FirmarTransmitirDocumento implements ShouldQueue
 {
@@ -32,6 +34,7 @@ class FirmarTransmitirDocumento implements ShouldQueue
         ProveedorDte $proveedor,
         GeneradorJsonDte $generador,
         AlmacenDte $almacen,
+        ValidadorDte $validador,
     ): void {
         // El job corre en contexto central: inicializamos el tenant explícitamente
         tenancy()->initialize(Tenant::find($this->tenantId));
@@ -46,6 +49,22 @@ class FirmarTransmitirDocumento implements ShouldQueue
             // 1. JSON + copia en disco
             $json = $generador->generar($documento);
             $rutaJson = $almacen->guardarJson($documento, $json);
+
+            // 1.1 Validación local contra el schema oficial del tipo de DTE.
+            // Sin assoc: el validador exige objetos (stdClass), no arreglos.
+            // Si falla: rechazo permanente, sin firma ni transmisión.
+            try {
+                $validador->validar(json_decode($json));
+            } catch (InvalidArgumentException $e) {
+                $documento->update([
+                    'estado' => EstadoDocumento::Rechazado,
+                    'respuesta_mh' => ['validacion_local' => $e->getMessage()],
+                ]);
+
+                Log::error("DTE {$this->documentoId} rechazado en validación local: {$e->getMessage()}");
+
+                return;
+            }
 
             // 2. Firma + copia en disco
             $firma = $proveedor->firmar($json);

@@ -14,8 +14,9 @@ class Documento extends Model
 
     protected $fillable = [
         'tipo_documento', 'numero_control', 'codigo_generacion',
+        'documento_padre_id',
         'receptor_id', 'receptor_tipo_documento', 'receptor_num_documento',
-        'receptor_nombre', 'receptor_correo',
+        'receptor_nombre', 'receptor_correo', 'receptor_snapshot',
         'estado', 'subtotal', 'iva', 'total',
         'json_dte', 'ruta_json', 'firma_jws', 'ruta_firma',
         'respuesta_mh', 'reintentos', 'fecha_emision',
@@ -26,6 +27,7 @@ class Documento extends Model
         'subtotal' => 'decimal:2',
         'iva' => 'decimal:2',
         'total' => 'decimal:2',
+        'receptor_snapshot' => 'array',
         'json_dte' => 'array',
         'respuesta_mh' => 'array',
         'fecha_emision' => 'datetime',
@@ -39,6 +41,18 @@ class Documento extends Model
     public function detalles(): HasMany
     {
         return $this->hasMany(DocumentoDetalle::class);
+    }
+
+    /** Documento que esta nota (05/06) afecta. */
+    public function padre(): BelongsTo
+    {
+        return $this->belongsTo(Documento::class, 'documento_padre_id');
+    }
+
+    /** Notas (05/06) emitidas sobre este documento. */
+    public function notas(): HasMany
+    {
+        return $this->hasMany(Documento::class, 'documento_padre_id');
     }
 
     /** borrador + número de control asignado = emitido, esperando la cola. */

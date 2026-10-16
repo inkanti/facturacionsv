@@ -2,6 +2,7 @@
 @section('titulo', 'Panel')
 @section('contenido')
     <h1>Panel general</h1>
+    
     <div class="tarjetas">
         <div class="tarjeta"><div class="num">{{ $totales['tenants'] }}</div><div class="lbl">Negocios registrados</div></div>
         <div class="tarjeta"><div class="num">{{ $totales['activas'] }}</div><div class="lbl">Suscripciones activas</div></div>

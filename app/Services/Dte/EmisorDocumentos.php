@@ -35,35 +35,85 @@ class EmisorDocumentos
                 'estado' => EstadoDocumento::Borrador,
             ]);
 
-            foreach ($items as $item) {
-                $producto = Producto::activos()->findOrFail($item['producto_id']);
-                $cantidad = (float) ($item['cantidad'] ?? 0);
-
-                if ($cantidad <= 0) {
-                    throw new InvalidArgumentException("Cantidad inválida para el producto {$producto->codigo}.");
-                }
-
-                $subtotal = round($cantidad * (float) $producto->precio_unitario, 2);
-                $iva = $producto->tipo_iva === TipoIva::Gravado
-                    ? round($subtotal * (float) $producto->porcentaje_iva / 100, 2)
-                    : 0.0;
-
-                $documento->detalles()->create([
-                    'producto_id' => $producto->id,
-                    'codigo' => $producto->codigo,
-                    'nombre' => $producto->nombre,
-                    'tipo_item' => (int) $producto->tipo,            // CAT-011
-                    'unidad_medida' => (int) $producto->unidad_medida, // CAT-014
-                    'cantidad' => $cantidad,
-                    'precio_unitario' => $producto->precio_unitario,
-                    'tipo_iva' => $producto->tipo_iva,
-                    'iva' => $iva,
-                    'subtotal' => $subtotal,
-                ]);
-            }
+            $this->attachDetalles($documento, $items);
 
             return $this->recalcularTotales($documento);
         });
+    }
+
+    /**
+     * Crea un borrador de nota de crédito (05) o débito (06) sobre un
+     * documento validado. El receptor y los ítems base salen del padre.
+     *
+     * @param array $items [['producto_id' => int, 'cantidad' => float], ...]
+     */
+    public function crearBorradorNota(Documento $padre, string $tipoDocumento, array $items): Documento
+    {
+        if (! in_array($tipoDocumento, [TipoDocumento::Nc->value, TipoDocumento::Nd->value], true)) {
+            throw new InvalidArgumentException('Tipo de nota inválido: solo 05 (NC) o 06 (ND).');
+        }
+
+        if ($padre->estado !== EstadoDocumento::Validado) {
+            throw new LogicException('Solo se pueden emitir notas sobre documentos en estado Validado.');
+        }
+
+        // Por ahora las notas se emiten solo sobre CCF (03): el receptor de la
+        // FE de consumidor final suele no tener los datos completos que el
+        // schema v4 de notas exige (nrc, actividad, dirección, etc.).
+        if ($padre->tipo_documento !== TipoDocumento::Ccf->value) {
+            throw new LogicException('Por ahora las notas solo se emiten sobre CCF (03).');
+        }
+
+        if (empty($items)) {
+            throw new InvalidArgumentException('La nota debe tener al menos un ítem.');
+        }
+
+        $receptor = $padre->receptor;
+
+        return DB::transaction(function () use ($padre, $tipoDocumento, $items, $receptor) {
+            $documento = Documento::create([
+                ...$this->snapshotReceptor($receptor),
+                'tipo_documento' => $tipoDocumento,
+                'receptor_id' => $receptor->id,
+                'documento_padre_id' => $padre->id,
+                'estado' => EstadoDocumento::Borrador,
+            ]);
+
+            $this->attachDetalles($documento, $items);
+
+            return $this->recalcularTotales($documento);
+        });
+    }
+
+    /** Crea el detalle del documento a partir de los ítems elegidos. */
+    private function attachDetalles(Documento $documento, array $items): void
+    {
+        foreach ($items as $item) {
+            $producto = Producto::activos()->findOrFail($item['producto_id']);
+            $cantidad = (float) ($item['cantidad'] ?? 0);
+
+            if ($cantidad <= 0) {
+                throw new InvalidArgumentException("Cantidad inválida para el producto {$producto->codigo}.");
+            }
+
+            $subtotal = round($cantidad * (float) $producto->precio_unitario, 2);
+            $iva = $producto->tipo_iva === TipoIva::Gravado
+                ? round($subtotal * (float) $producto->porcentaje_iva / 100, 2)
+                : 0.0;
+
+            $documento->detalles()->create([
+                'producto_id' => $producto->id,
+                'codigo' => $producto->codigo,
+                'nombre' => $producto->nombre,
+                'tipo_item' => (int) $producto->tipo,            // CAT-011
+                'unidad_medida' => (int) $producto->unidad_medida, // CAT-014
+                'cantidad' => $cantidad,
+                'precio_unitario' => $producto->precio_unitario,
+                'tipo_iva' => $producto->tipo_iva,
+                'iva' => $iva,
+                'subtotal' => $subtotal,
+            ]);
+        }
     }
 
     /**
@@ -134,6 +184,9 @@ class EmisorDocumentos
      * Número de control oficial (regex del schema v4):
      * DTE-{tipo}-{letra}{codEstable 3}P{codPuntoVenta 3}-{secuencia 15}
      * Letra por CAT-009: 01 Sucursal=S, 02 Casa Matriz=M, 04 Bodega=B, 07 Patio=P
+     *
+     * El correlativo se calcula como MÁXIMO existente + 1 (no como conteo):
+     * count()+1 falla cuando hay huecos en la secuencia (documentos eliminados).
      */
     private function generarNumeroControl(string $tipoDocumento): string
     {
@@ -144,15 +197,19 @@ class EmisorDocumentos
             default => 'M',
         };
 
-        $secuencia = Documento::where('tipo_documento', $tipoDocumento)
-    ->whereNotNull('numero_control')
-    ->count() + 1;
+        // La secuencia son los últimos 15 caracteres del número de control;
+        // al ir con ceros a la izquierda, el max() alfabético = max numérico.
+        $ultimo = Documento::where('tipo_documento', $tipoDocumento)
+            ->whereNotNull('numero_control')
+            ->max('numero_control');
+
+        $secuencia = $ultimo ? ((int) substr($ultimo, -15)) + 1 : 1;
 
         return sprintf(
             'DTE-%s-%s%03dP%03d-%015d',
             $tipoDocumento,
             $letra,
-            (int) $emisor->codigo_establecimiento,   // <- era $emisor->cod_estable
+            (int) $emisor->codigo_establecimiento,
             (int) ($emisor->cod_punto_venta ?? 0),
             $secuencia
         );

@@ -1,0 +1,8 @@
+php artisan serve          =>   para levantar el server
+
+http://facturadorsv.test:8000/admin/login              =>   para ingresar al sistema
+
+usuario:    admin@facturadorsv.test
+pwd:    Admin12345
+
+

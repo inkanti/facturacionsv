@@ -32,8 +32,12 @@ Route::middleware([
 
     // Rutas de negocio: solo con suscripción vigente
     Route::middleware('suscripcion.activa')->group(function () {
-        Route::get('documentos', [DocumentoController::class, 'index'])->name('documentos.index');
-        Route::get('documentos/{documento}', [DocumentoController::class, 'show'])->name('documentos.show');
+
+        Route::get('documentos', \App\Livewire\Tenant\Documentos\Lista::class)->name('documentos.index');
+        Route::get('documentos/crear', \App\Livewire\Tenant\Documentos\Crear::class)->name('documentos.crear');
+        Route::get('documentos/{documento}', \App\Livewire\Tenant\Documentos\Mostrar::class)->name('documentos.show');
+        Route::get('documentos/{documento}/notas/crear/{tipo}', \App\Livewire\Tenant\Documentos\CrearNota::class)
+    ->name('documentos.notas.crear');
         Route::get('documentos/{documento}/json', [DocumentoController::class, 'descargarJson'])->name('documentos.json');
         Route::get('documentos/{documento}/pdf', [DocumentoController::class, 'descargarPdf'])->name('documentos.pdf');
         Route::post('documentos/{documento}/consultar-mh', [DocumentoController::class, 'consultarMh'])->name('documentos.consultar-mh');
